@@ -85,22 +85,25 @@ static volatile LONG g_svcStopRequested = 0;
 /* =============================================================================
  * JSON helpers and metrics data structures for REST API payload
  * ============================================================================= */
+
+ // Converts an arbitrary string to a form that is safe to embed in JSON.
 static std::string JsonEscape(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 8);
     for (unsigned char c : s) {
-        if (c == '"') out += "\\\"";
-        else if (c == '\\') out += "\\\\";
-        else if (c == '\b') out += "\\b";
-        else if (c == '\f') out += "\\f";
-        else if (c == '\n') out += "\\n";
-        else if (c == '\r') out += "\\r";
-        else if (c == '\t') out += "\\t";
-        else if (c < 32) { char buf[8]; sprintf_s(buf, "\\u%04x", c); out += buf; }
-        else out += c;
+        if (c == '"') out += "\\\""; // Escape double quotes.
+        else if (c == '\\') out += "\\\\"; // Escape backslashes.
+        else if (c == '\b') out += "\\b"; // Escape backspace.
+        else if (c == '\f') out += "\\f"; // Escape form feeds. 
+        else if (c == '\n') out += "\\n"; // Escape newlines.
+        else if (c == '\r') out += "\\r"; // Escape carriage returns.
+        else if (c == '\t') out += "\\t"; // Escape tabs.
+        else if (c < 32) { char buf[8]; sprintf_s(buf, "\\u%04x", c); out += buf; } // Escape control characters.
+        else out += c; 
     }
     return out;
 }
+// Assumes text is already encoded as UTF-8. Otherwise, use a proper JSON encoder.
 
 struct CpuData { DWORD mhz = 0; double usage_percent = 0.0; double responsiveness_percent = 100.0; std::string timestamp; };
 struct CpuCoreEntry { DWORD index = 0; DWORD mhz = 0; double usage_percent = 0.0; std::string timestamp; };
@@ -115,6 +118,7 @@ struct DiskEntry { std::string drive_letter; ULONGLONG total_bytes = 0, free_byt
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 #endif
 
+// NTSTATUS is a long integer that represents the status of an operation.
 typedef LONG NTSTATUS;
 typedef NTSTATUS (NTAPI *PNtQuerySystemInformation)(
     ULONG SystemInformationClass,
@@ -123,6 +127,7 @@ typedef NTSTATUS (NTAPI *PNtQuerySystemInformation)(
     PULONG ReturnLength
 );
 
+// SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION is a structure that contains the performance information for a processor.
 typedef struct _SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION {
     LARGE_INTEGER IdleTime;
     LARGE_INTEGER KernelTime;
@@ -132,11 +137,12 @@ typedef struct _SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION {
     ULONG InterruptCount;
 } SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION, *PSYSTEM_PROCESSOR_PERFORMANCE_INFORMATION;
 
-#define SystemProcessorPerformanceInformation 8
+#define SystemProcessorPerformanceInformation 8 
 
 /* -----------------------------------------------------------------------------
  * Timestamp as string (ISO-like) for primary key use
  * ----------------------------------------------------------------------------- */
+ // GetTimestamp() returns a string representation of the current time in the format of YYYY-MM-DD HH:MM:SS.mmm
 static std::string GetTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);
@@ -145,8 +151,8 @@ static std::string GetTimestamp() {
     std::tm tm_buf;
     localtime_s(&tm_buf, &time);
     std::ostringstream oss;
-    oss << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S");
-    oss << '.' << std::setfill('0') << std::setw(3) << ms.count();
+    oss << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S"); // Format the time as YYYY-MM-DD HH:MM:SS
+    oss << '.' << std::setfill('0') << std::setw(3) << ms.count(); // Add the milliseconds.
     return oss.str();
 }
 
@@ -157,6 +163,11 @@ static ULONGLONG s_prevIdle = 0, s_prevKernel = 0, s_prevUser = 0, s_prevTotal =
 
 static bool GetCpuMhz(DWORD& outMhz) {
     HKEY hKey;
+    // Open the registry key for the first processor. If the key is not found, return false.
+    // The key is located at "HARDWARE\DESCRIPTION\System\CentralProcessor\0".
+    
+    //! See this block if the Windows registry is not available on a given restricted environment, or
+    // if a future Windows update changes where the registry key is located.
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
             "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
             0, KEY_READ, &hKey) != ERROR_SUCCESS)
@@ -167,6 +178,9 @@ static bool GetCpuMhz(DWORD& outMhz) {
     return (r == ERROR_SUCCESS && type == REG_DWORD);
 }
 
+// GetCpuUsagePercent() returns the CPU usage percentage.
+// Calculates the CPU usage percentage based on the system times
+// uses the previous total and idle times to calculate the usage percentage.
 static double GetCpuUsagePercent() {
     FILETIME idleTime, kernelTime, userTime;
     if (!GetSystemTimes(&idleTime, &kernelTime, &userTime))
@@ -181,6 +195,10 @@ static double GetCpuUsagePercent() {
     ULONGLONG idle = uIdle.QuadPart, kernel = uKernel.QuadPart, user = uUser.QuadPart;
     ULONGLONG total = kernel + user;
     double pct = 0.0;
+
+    // Using the formula: (total - idle) / total * 100 
+    // and the previous total and idle times to calculate the usage percentage.
+    // The usage percentage is then stored in the s_prevTotal and s_prevIdle variables.
     if (s_prevTotal != 0 && total > s_prevTotal) {
         ULONGLONG dTotal = total - s_prevTotal;
         ULONGLONG dIdle = idle - s_prevIdle;
@@ -199,11 +217,15 @@ static double GetCpuUsagePercent() {
  * =============================================================================
  * Uses SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION deltas across all processors.
  * We treat DpcTime + InterruptTime as "delay" time inside kernel; responsiveness
- * is 100% when that share is 0, and decreases as the share increases.
+ * is 100% when that share is 0, and decreases as the share increases. This differs
+ * traditional measures of responsiveness, which typically use the ratio of kernel time to total time.
  */
+
 static double GetSystemResponsivenessPercent() {
     static std::vector<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION> prevInfo;
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+    // Estimate 100% responsiveness if the NtQuerySystemInformation function is not available.
+    // or if the CPU just spent ~0 iota of time handling interrupts and DPCs.
     if (!hNtdll) return 100.0;
     auto pNtQuery = (PNtQuerySystemInformation)GetProcAddress(hNtdll, "NtQuerySystemInformation");
     if (!pNtQuery) return 100.0;
@@ -225,6 +247,7 @@ static double GetSystemResponsivenessPercent() {
     long double total = 0.0L;
     long double delay = 0.0L;
 
+    // Sum across all processors to get the total time and the delay time.
     for (DWORD i = 0; i < nCpus; i++) {
         const auto& now = info[i];
         const auto& prev = prevInfo[i];
@@ -233,6 +256,7 @@ static double GetSystemResponsivenessPercent() {
         ULONGLONG uNow = (ULONGLONG)now.UserTime.QuadPart;
         ULONGLONG kPrev = (ULONGLONG)prev.KernelTime.QuadPart;
         ULONGLONG uPrev = (ULONGLONG)prev.UserTime.QuadPart;
+        // Use the formula: (kNow + uNow) - (kPrev + uPrev) to get the total time.
         LONGLONG dTotal = (LONGLONG)((kNow + uNow) - (kPrev + uPrev));
         if (dTotal <= 0)
             continue;
@@ -249,6 +273,7 @@ static double GetSystemResponsivenessPercent() {
     if (total <= 0.0L)
         return 100.0;
 
+    // Clamp the fraction to 0-1 and convert to a percentage.
     long double frac = delay / total;
     if (frac < 0.0L) frac = 0.0L;
     if (frac > 1.0L) frac = 1.0L;
@@ -260,6 +285,7 @@ static double GetSystemResponsivenessPercent() {
 
 static std::vector<double> GetPerCoreUsage();  /* forward declaration */
 
+// Cleanly package CPU data for the REST API. 
 static CpuData GetCpuData() {
     CpuData d;
     d.timestamp = GetTimestamp();
@@ -306,21 +332,30 @@ static std::vector<DWORD> GetPerCoreCurrentMhz() {
     return mhz;
 }
 
+// Get from the same location as responsiveness with SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION.
+// Calculate the usage percent as 100 * (1 - (idleNow - idlePrev) / (totalNow - totalPrev))
+// for dtotal > 0. 
+// Call GetPerCoreUsage() once before the real sampling to prime the previous values.
 static std::vector<double> GetPerCoreUsage() {
     static std::vector<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION> prevInfo;
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+
     if (!hNtdll) return {};
     auto pNtQuery = (PNtQuerySystemInformation)GetProcAddress(hNtdll, "NtQuerySystemInformation");
     if (!pNtQuery) return {};
     SYSTEM_INFO si;
+
     GetSystemInfo(&si);
     DWORD nCpus = si.dwNumberOfProcessors;
     std::vector<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION> info(nCpus);
     ULONG len = 0;
+
     if (pNtQuery(SystemProcessorPerformanceInformation, info.data(),
             (ULONG)(info.size() * sizeof(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION)), &len) != 0)
         return {};
+
     std::vector<double> usage(nCpus, 0.0);
+
     if (!prevInfo.empty() && prevInfo.size() == info.size()) {
         for (size_t i = 0; i < info.size(); i++) {
             ULONGLONG idleNow = (ULONGLONG)info[i].IdleTime.QuadPart;
@@ -337,10 +372,13 @@ static std::vector<double> GetPerCoreUsage() {
                 usage[i] = 100.0 * (1.0 - (double)dIdle / (double)dTotal);
         }
     }
+
     prevInfo = info;
     return usage;
 }
 
+// Defensively falls back to 0.0 usage if the number of processors is not available.
+// Or resizes the vector to fit the number of processors on the system
 static std::vector<CpuCoreEntry> GetCpuCoresData() {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
@@ -366,6 +404,9 @@ static std::vector<CpuCoreEntry> GetCpuCoresData() {
 /* =============================================================================
  * Memory: total, free, used, usage %, page faults, timestamp
  * ============================================================================= */
+
+ // Initialize the memory data structure and get the memory usage percentage from the PDH counter.
+ // Return default-initialized MemoryData d of zeroes if the GlobalMemoryStatusEx function fails.
 static MemoryData GetMemoryData() {
     MemoryData d;
     MEMORYSTATUSEX mem = {};
@@ -375,6 +416,8 @@ static MemoryData GetMemoryData() {
     static PDH_HCOUNTER hPageFaults = nullptr;
     static bool memInit = false;
     if (!memInit) {
+        // Use English counter names for the Page Faults/sec counter.
+        // This is more likely to be available on all systems.
         if (PdhOpenQueryA(nullptr, 0, &hMemQuery) == ERROR_SUCCESS &&
             PdhAddEnglishCounterA(hMemQuery, "\\Memory\\Page Faults/sec", 0, &hPageFaults) == ERROR_SUCCESS) {
             PdhCollectQueryData(hMemQuery);
@@ -394,6 +437,11 @@ static MemoryData GetMemoryData() {
     return d;
 }
 
+// Note for above: PDH rate counters (Disk Read/Write Bytes/sec) need two samples with a time
+// interval between them; otherwise the rate is 0. We collect once, sleep 1s,
+// collect again, then read the value.
+// If _Total reports 0 for read (known on some systems), we sum per-disk instances.
+
 /* =============================================================================
  * Disk: drive letter, total, free, read_speed, write_speed, timestamp
  * =============================================================================
@@ -408,6 +456,11 @@ static void GetDiskSpeeds(ULONGLONG& readBytesPerSec, ULONGLONG& writeBytesPerSe
     static bool init = false;
     readBytesPerSec = 0;
     writeBytesPerSec = 0;
+
+    // Again, we need two samples with an interval between them; otherwise the rate is 0.
+    // This function, as with memory, will introduce ~1s of latency per call. 
+
+    // Potentially > 2s of latency per call if the defensive fallbacks are reached. 
     if (!init) {
         if (PdhOpenQueryA(nullptr, 0, &hQuery) != ERROR_SUCCESS) return;
         /* Try _Total first (all disks); fallback to first physical disk (0) */
@@ -424,16 +477,20 @@ static void GetDiskSpeeds(ULONGLONG& readBytesPerSec, ULONGLONG& writeBytesPerSe
         PdhCollectQueryData(hQuery);
         init = true;
     }
+
     /* Rate counters need two samples with an interval; sleep 1s then collect again */
-    Sleep(1000);
+    Sleep(1000); // Sleep for 1 second to collect the second sample.
     if (PdhCollectQueryData(hQuery) != ERROR_SUCCESS) return;
     PDH_FMT_COUNTERVALUE val;
+
     /* Read: some systems return rate as double; try both formats */
     if (PdhGetFormattedCounterValue(hRead, PDH_FMT_DOUBLE, nullptr, &val) == ERROR_SUCCESS && val.CStatus == PDH_CSTATUS_VALID_DATA)
         readBytesPerSec = (ULONGLONG)val.doubleValue;
+
     if (readBytesPerSec == 0 && PdhGetFormattedCounterValue(hRead, PDH_FMT_LARGE, nullptr, &val) == ERROR_SUCCESS && val.CStatus == PDH_CSTATUS_VALID_DATA)
         readBytesPerSec = val.largeValue;
     /* Fallback: _Total often reports 0 for read on some Windows/drivers; sum instances 0..3 */
+
     if (readBytesPerSec == 0) {
         PDH_HQUERY hQ2 = nullptr;
         PDH_HCOUNTER hCounters[4] = { nullptr };
@@ -445,9 +502,10 @@ static void GetDiskSpeeds(ULONGLONG& readBytesPerSec, ULONGLONG& writeBytesPerSe
                 if (PdhAddEnglishCounterA(hQ2, path, 0, &hCounters[nAdded]) == ERROR_SUCCESS)
                     nAdded++;
             }
+            // Sum the read rates from all disks.
             if (nAdded > 0) {
                 PdhCollectQueryData(hQ2);
-                Sleep(1000);
+                Sleep(1000); // Sleep for 1 second to collect the second sample.
                 if (PdhCollectQueryData(hQ2) == ERROR_SUCCESS) {
                     ULONGLONG sum = 0;
                     for (int j = 0; j < nAdded; j++) {
@@ -462,8 +520,11 @@ static void GetDiskSpeeds(ULONGLONG& readBytesPerSec, ULONGLONG& writeBytesPerSe
             PdhCloseQuery(hQ2);
         }
     }
+
+    // Write: same as read; try both formats.
     if (PdhGetFormattedCounterValue(hWrite, PDH_FMT_DOUBLE, nullptr, &val) == ERROR_SUCCESS && val.CStatus == PDH_CSTATUS_VALID_DATA)
         writeBytesPerSec = (ULONGLONG)val.doubleValue;
+
     if (writeBytesPerSec == 0 && PdhGetFormattedCounterValue(hWrite, PDH_FMT_LARGE, nullptr, &val) == ERROR_SUCCESS && val.CStatus == PDH_CSTATUS_VALID_DATA)
         writeBytesPerSec = val.largeValue;
 }
@@ -475,6 +536,11 @@ static std::vector<DiskEntry> GetDiskData() {
     if (GetLogicalDriveStringsA(sizeof(drives) - 1, drives) == 0) return list;
     ULONGLONG readSpeed = 0, writeSpeed = 0;
     GetDiskSpeeds(readSpeed, writeSpeed);
+
+    // Iterate over all logical drives and get the disk usage data.
+    // Why do we step by 4 characters? Because the logical drive strings are separated by null characters.
+    //! This can break if Windows ever changes the format of the logical drive strings or returns a drive
+    // letter longer than 3 characters.
     for (char* p = drives; *p; p += 4) {
         std::string root(p);
         if (root.size() >= 2) root.resize(2);
@@ -498,6 +564,7 @@ static std::vector<DiskEntry> GetDiskData() {
 /* =============================================================================
  * Process owner from token
  * ============================================================================= */
+ // Get the owner of the process. This is a security-sensitive operation and should be used with caution.
 static std::string GetProcessOwner(HANDLE hProcess) {
     HANDLE hToken = nullptr;
     if (!OpenProcessToken(hProcess, TOKEN_QUERY, &hToken)) return "";
@@ -523,6 +590,12 @@ static std::string GetProcessOwner(HANDLE hProcess) {
     return name;
 }
 
+// Convert the priority class to a string.
+// Again, security-sensitive because it can reveal information about the process's priority
+// to unauthorized users.
+
+//! Be careful with real-time priority class; it can cause the process to starve other processes.
+//! Avoid setting it unless required in testing or debugging. 
 static std::string PriorityClassToString(DWORD pc) {
     switch (pc) {
         case REALTIME_PRIORITY_CLASS: return "REALTIME";
@@ -538,6 +611,7 @@ static std::string PriorityClassToString(DWORD pc) {
 /* =============================================================================
  * Processes: PID, name, owner, priority, cpu_percent, cpu_time, location, timestamp
  * ============================================================================= */
+ // Defines the core structure of per-process metrics in the JSON.
 struct ProcessMetrics {
     DWORD pid;
     std::string name;
@@ -545,12 +619,27 @@ struct ProcessMetrics {
     std::string priority;
     double cpuPercent;
     ULONGLONG cpuTime100ns;
+    ULONGLONG memoryWorkingSetBytes;
+    double memoryPercent;
     std::string location;
 };
 
+// Read the following: 
+// - total RAM (for memory percentage calculation)
+// - total system time (for CPU percentage calculation)
+// - total user time (for CPU percentage calculation)
+
+// For each process, do the following:
+// - Store defaults 
+// - Attempt to open the process handle
+// - If successful, populate the process owner, priority, and location
 static std::vector<ProcessMetrics> GetProcessMetrics() {
     static std::map<DWORD, std::pair<ULONGLONG, ULONGLONG>> prevTimes;
     static ULONGLONG prevTotalKernel = 0, prevTotalUser = 0;
+    MEMORYSTATUSEX mem = {};
+    mem.dwLength = sizeof(mem);
+    GlobalMemoryStatusEx(&mem);
+    const long double totalPhys = (mem.ullTotalPhys > 0) ? (long double)mem.ullTotalPhys : 0.0L;
     FILETIME ftIdle, ftKernel, ftUser;
     GetSystemTimes(&ftIdle, &ftKernel, &ftUser);
     ULARGE_INTEGER uK, uU;
@@ -562,16 +651,23 @@ static std::vector<ProcessMetrics> GetProcessMetrics() {
     if (hSnap == INVALID_HANDLE_VALUE) return list;
     PROCESSENTRY32 pe = {};
     pe.dwSize = sizeof(pe);
+
+    // Same as obtaining overall CPU usage: we need two samples with an interval between them.
     if (!Process32First(hSnap, &pe)) { CloseHandle(hSnap); return list; }
     do {
         ProcessMetrics pm;
+        // Set the process ID, name, owner, priority, and location to defaults.
         pm.pid = pe.th32ProcessID;
         pm.name = pe.szExeFile;
         pm.owner = "";
         pm.priority = "NORMAL";
         pm.cpuPercent = 0.0;
         pm.cpuTime100ns = 0;
+        pm.memoryWorkingSetBytes = 0;
+        pm.memoryPercent = 0.0;
         pm.location = "";
+
+        // Open the process handle.
         HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION,
             FALSE, pe.th32ProcessID);
         if (hProc) {
@@ -593,9 +689,23 @@ static std::vector<ProcessMetrics> GetProcessMetrics() {
                 }
                 prevTimes[pm.pid] = { pm.cpuTime100ns, 0 };
             }
+            // Get the location of the process.
             char path[MAX_PATH] = {};
             if (GetModuleFileNameExA(hProc, nullptr, path, MAX_PATH))
                 pm.location = path;
+
+            // Get the memory usage of the process.
+            PROCESS_MEMORY_COUNTERS_EX pmc = {};
+            pmc.cb = sizeof(pmc);
+            if (GetProcessMemoryInfo(hProc, (PPROCESS_MEMORY_COUNTERS)&pmc, sizeof(pmc))) {
+                pm.memoryWorkingSetBytes = (ULONGLONG)pmc.WorkingSetSize;
+                if (totalPhys > 0.0L) {
+                    long double pct = ((long double)pm.memoryWorkingSetBytes / totalPhys) * 100.0L;
+                    if (pct < 0.0L) pct = 0.0L;
+                    if (pct > 100.0L) pct = 100.0L;
+                    pm.memoryPercent = (double)pct;
+                }
+            }
             CloseHandle(hProc);
         }
         list.push_back(pm);
@@ -609,6 +719,10 @@ static std::vector<ProcessMetrics> GetProcessMetrics() {
 /* =============================================================================
  * Format collected metrics as JSON (compact for stdout / REST API)
  * ============================================================================= */
+
+ // Format the collected metrics as JSON in a compact format for stdout / REST API.
+
+ // Compacted form for concision.
 static std::string FormatMetricsJsonCompact(const CpuData& cpu, const std::vector<CpuCoreEntry>& cores,
     const MemoryData& mem, const std::vector<DiskEntry>& disks,
     const std::vector<ProcessMetrics>& processes, const std::string& procTs) {
@@ -640,7 +754,9 @@ static std::string FormatMetricsJsonCompact(const CpuData& cpu, const std::vecto
         const auto& p = processes[i];
         if (i) js << ",";
         js << "{\"pid\": " << p.pid << ", \"name\": \"" << JsonEscape(p.name) << "\", \"owner\": \"" << JsonEscape(p.owner) << "\", \"priority\": \"" << JsonEscape(p.priority)
-           << "\", \"cpu_percent\": " << p.cpuPercent << ", \"cpu_time_100ns\": " << p.cpuTime100ns << ", \"location\": \"" << JsonEscape(p.location)
+           << "\", \"cpu_percent\": " << p.cpuPercent << ", \"cpu_time_100ns\": " << p.cpuTime100ns
+           << ", \"memory_working_set_bytes\": " << p.memoryWorkingSetBytes << ", \"memory_usage_percent\": " << p.memoryPercent
+           << ", \"location\": \"" << JsonEscape(p.location)
            << "\", \"timestamp\": \"" << JsonEscape(procTs) << "\"}";
     }
     js << "]\n}\n";
@@ -687,6 +803,7 @@ static std::string FormatMetricsJsonPretty(const CpuData& cpu, const std::vector
         js << "    {\n      \"pid\": " << p.pid << ",\n      \"name\": \"" << JsonEscape(p.name)
            << "\",\n      \"owner\": \"" << JsonEscape(p.owner) << "\",\n      \"priority\": \"" << JsonEscape(p.priority)
            << "\",\n      \"cpu_percent\": " << p.cpuPercent << ",\n      \"cpu_time_100ns\": " << p.cpuTime100ns
+           << ",\n      \"memory_working_set_bytes\": " << p.memoryWorkingSetBytes << ",\n      \"memory_usage_percent\": " << p.memoryPercent
            << ",\n      \"location\": \"" << JsonEscape(p.location) << "\",\n      \"timestamp\": \"" << JsonEscape(procTs) << "\"\n    }";
         js << (i + 1 < processes.size() ? ",\n" : "\n");
     }
@@ -694,6 +811,7 @@ static std::string FormatMetricsJsonPretty(const CpuData& cpu, const std::vector
     return js.str();
 }
 
+// Write everything to the file.
 static bool WriteMetricsJsonToFile(const std::string& filepath, const std::string& jsonContent) {
     std::ofstream f(filepath);
     if (!f) return false;
@@ -704,6 +822,8 @@ static bool WriteMetricsJsonToFile(const std::string& filepath, const std::strin
 /* =============================================================================
  * Windows Service: get exe directory, handler, ServiceMain, install/remove
  * ============================================================================= */
+ // Implement the Windows Service path to get the executable running as a service
+ // This is a security-sensitive operation and should be used with caution.
 static std::string GetExeDirectory() {
     char path[MAX_PATH] = {};
     if (GetModuleFileNameA(nullptr, path, MAX_PATH) == 0) return "";
@@ -713,14 +833,17 @@ static std::string GetExeDirectory() {
     return s;
 }
 
+// Handle the Windows Service control requests.
 static VOID WINAPI SvcCtrlHandler(DWORD ctrl) {
     switch (ctrl) {
+        // Stop the service.
         case SERVICE_CONTROL_STOP:
             InterlockedExchange(&g_svcStopRequested, 1);
             g_svcStatus.dwCurrentState = SERVICE_STOP_PENDING;
             g_svcStatus.dwWaitHint = 5000;
             SetServiceStatus(g_svcStatusHandle, &g_svcStatus);
             return;
+        // Do nothing.
         case SERVICE_CONTROL_INTERROGATE:
             break;
         default:
@@ -729,6 +852,7 @@ static VOID WINAPI SvcCtrlHandler(DWORD ctrl) {
     SetServiceStatus(g_svcStatusHandle, &g_svcStatus);
 }
 
+// Report the status of the service to the Windows Service Control Manager.
 static void ReportSvcStatus(DWORD state, DWORD win32Exit = NO_ERROR, DWORD waitHint = 0) {
     g_svcStatus.dwCurrentState = state;
     g_svcStatus.dwWin32ExitCode = win32Exit;
@@ -740,6 +864,7 @@ static void ReportSvcStatus(DWORD state, DWORD win32Exit = NO_ERROR, DWORD waitH
     SetServiceStatus(g_svcStatusHandle, &g_svcStatus);
 }
 
+// The main function for the Windows Service.
 static VOID WINAPI ServiceMain(DWORD argc, LPSTR* argv) {
     (void)argc;
     (void)argv;
@@ -769,6 +894,7 @@ static VOID WINAPI ServiceMain(DWORD argc, LPSTR* argv) {
     ReportSvcStatus(SERVICE_STOPPED);
 }
 
+// Install the Windows Service.
 static bool InstallService() {
     char exePath[MAX_PATH] = {};
     if (GetModuleFileNameA(nullptr, exePath, MAX_PATH) == 0) return false;
@@ -782,6 +908,7 @@ static bool InstallService() {
     return (svc != nullptr);
 }
 
+// Uninstall the Windows Service.
 static bool RemoveService() {
     SC_HANDLE scm = OpenSCManagerA(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
     if (!scm) return false;
