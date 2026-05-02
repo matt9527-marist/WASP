@@ -7,6 +7,20 @@
  */
 const WS_URL = "ws://localhost:8080/ws/metrics";
 
+/**
+ * History CSV endpoint. When the page is served over http(s), use same-origin `/api/...`
+ * (e.g. python serve_dashboard.py) so fetch avoids CORS. file:// cannot talk to the API
+ * without backend CORS or this proxy.
+ * @returns {string}
+ */
+function getHistoryReportsUrl() {
+  const p = window.location.protocol;
+  if (p === "http:" || p === "https:") {
+    return `${window.location.origin}/api/history-reports`;
+  }
+  return "http://127.0.0.1:8080/api/history-reports";
+}
+
 const connectionStatusEl = document.getElementById("connectionStatus");
 const statusIndicatorEl = document.querySelector(".status-indicator");
 const currentDateEl = document.getElementById("currentDate");
@@ -21,6 +35,8 @@ const viewMainEl = document.getElementById("viewMain");
 const viewProcessesEl = document.getElementById("viewProcesses");
 const viewMemoryEl = document.getElementById("viewMemory");
 const viewDiskEl = document.getElementById("viewDisk");
+const viewExportEl = document.getElementById("viewExport");
+const exportStatusEl = document.getElementById("exportStatus");
 const allProcessesTableBodyEl = document.querySelector("#allProcessesTable tbody");
 const allProcessesSearchEl = document.getElementById("allProcessesSearch");
 const memoryViewPercentEl = document.getElementById("memoryViewPercent");
@@ -700,19 +716,112 @@ if (themeToggleBtn) {
   themeToggleBtn.addEventListener("click", toggleTheme);
 }
 
-// Sidebar: switch content views (Main / Memory / Disk / All Processes); Export is a no-op for now.
+/**
+ * Fetches the bundled history CSV from the backend (header + 3 rows: 5m, 30m, 1h).
+ * @returns {Promise<string>}
+ */
+async function fetchHistoryReportsCsv() {
+  const res = await fetch(getHistoryReportsUrl(), { method: "GET" });
+  if (!res.ok) {
+    throw new Error(`Request failed (${res.status} ${res.statusText})`);
+  }
+  return res.text();
+}
+
+/**
+ * Splits the API CSV into header and three metric rows in order.
+ * @param {string} text - Raw CSV body from `/api/history-reports`.
+ * @returns {{ header: string, rows: [string, string, string] }}
+ */
+function splitHistoryReportCsv(text) {
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim().split("\n");
+  if (lines.length < 4) {
+    throw new Error("Unexpected CSV: expected a header and 3 data rows.");
+  }
+  return {
+    header: lines[0],
+    rows: [lines[1], lines[2], lines[3]],
+  };
+}
+
+/**
+ * Triggers a file download in the browser from text content.
+ * @param {string} filename
+ * @param {string} csvBody - Full CSV including trailing newline if desired.
+ */
+function downloadTextFile(filename, csvBody) {
+  const blob = new Blob(["\uFEFF", csvBody], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+const EXPORT_WINDOW_FILES = {
+  "5m": { rowIndex: 0, filename: "history-report-5m.csv" },
+  "30m": { rowIndex: 1, filename: "history-report-30m.csv" },
+  "1h": { rowIndex: 2, filename: "history-report-1h.csv" },
+};
+
+/**
+ * Downloads a single-window CSV by fetching `/api/history-reports` and extracting one row.
+ * @param {"5m"|"30m"|"1h"} windowKey
+ */
+async function downloadHistoryReportForWindow(windowKey) {
+  const meta = EXPORT_WINDOW_FILES[windowKey];
+  if (!meta) return;
+
+  if (exportStatusEl) exportStatusEl.textContent = "";
+
+  try {
+    const raw = await fetchHistoryReportsCsv();
+    const { header, rows } = splitHistoryReportCsv(raw);
+    const row = rows[meta.rowIndex];
+    const csvBody = `${header}\n${row}\n`;
+    downloadTextFile(meta.filename, csvBody);
+    if (exportStatusEl) {
+      exportStatusEl.textContent = `Saved ${meta.filename}`;
+    }
+  } catch (err) {
+    console.error(err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (exportStatusEl) {
+      let hint = "";
+      if (window.location.protocol === "file:") {
+        hint =
+          " Open via http://127.0.0.1:8765/index.html (run python serve_dashboard.py from the project folder) to avoid CORS.";
+      }
+      exportStatusEl.textContent = `Could not download report: ${msg}.${hint}`;
+    }
+  }
+}
+
+// Export view: each button downloads one aggregation window from the same API response shape.
+document.querySelectorAll(".export-download-btn[data-export-window]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const key = btn.getAttribute("data-export-window");
+    if (key === "5m" || key === "30m" || key === "1h") {
+      downloadHistoryReportForWindow(key);
+    }
+  });
+});
+
+// Sidebar: switch content views (Main / Memory / Disk / All Processes / Export Report).
 document.querySelectorAll(".nav-item[data-view]").forEach((btn) => {
   btn.addEventListener("click", () => {
     const view = btn.getAttribute("data-view");
-    if (view === "export") {
-      return;
-    }
     document.querySelectorAll(".nav-item[data-view]").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     if (viewMainEl) viewMainEl.classList.toggle("active", view === "main");
     if (viewMemoryEl) viewMemoryEl.classList.toggle("active", view === "memory");
     if (viewDiskEl) viewDiskEl.classList.toggle("active", view === "disk");
     if (viewProcessesEl) viewProcessesEl.classList.toggle("active", view === "processes");
+    if (viewExportEl) viewExportEl.classList.toggle("active", view === "export");
     if (view === "main") {
       requestAnimationFrame(() => drawCpuHistory());
     }

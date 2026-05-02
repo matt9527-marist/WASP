@@ -137,6 +137,58 @@
             <div id="diskCards" class="disk-cards"></div>
           </section>
         </div>
+
+        <div id="viewExport" class="content-view">
+          <section id="exportSection">
+            <div class="processTableTitle">Export Report</div>
+            <p class="memory-subtext">
+              Download CSV files with metrics aggregated over the last 5 minutes, 30 minutes, or 1 hour (from
+              <code style="font-size:12px;">/api/history-reports</code>).
+            </p>
+            <p id="exportStatus" class="memory-subtext" style="margin-top:8px;min-height:1.2em;"></p>
+            <div
+              class="export-actions"
+              style="display:flex;flex-direction:column;gap:12px;margin-top:12px;max-width:520px;"
+            >
+              <div class="memory-card">
+                <div class="processTableTitle">5 minutes</div>
+                <p class="memory-subtext">Aggregated metrics for the last 5 minutes.</p>
+                <button
+                  type="button"
+                  class="nav-item export-download-btn"
+                  style="width:100%;margin-top:8px;box-sizing:border-box;"
+                  data-export-window="5m"
+                >
+                  Download CSV
+                </button>
+              </div>
+              <div class="memory-card">
+                <div class="processTableTitle">30 minutes</div>
+                <p class="memory-subtext">Aggregated metrics for the last 30 minutes.</p>
+                <button
+                  type="button"
+                  class="nav-item export-download-btn"
+                  style="width:100%;margin-top:8px;box-sizing:border-box;"
+                  data-export-window="30m"
+                >
+                  Download CSV
+                </button>
+              </div>
+              <div class="memory-card">
+                <div class="processTableTitle">1 hour</div>
+                <p class="memory-subtext">Aggregated metrics for the last hour.</p>
+                <button
+                  type="button"
+                  class="nav-item export-download-btn"
+                  style="width:100%;margin-top:8px;box-sizing:border-box;"
+                  data-export-window="1h"
+                >
+                  Download CSV
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
       </main>
     </div>
 
